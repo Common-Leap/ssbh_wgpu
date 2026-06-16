@@ -660,6 +660,10 @@ impl SsbhRenderer {
             &self.pass_info.skel_depth_stencil.view,
             &self.pass_info.skel_outline_bind_group,
         );
+
+        // 1× mesh depth for editor particle tests (includes near pass). wgpu has no depth MSAA
+        // resolve_target, so re-render at 1× instead of copying pass_info.depth (4× MSAA).
+        self.refresh_mesh_depth_resolved(encoder, render_models);
     }
 
     /// Completes rendering by drawing the models and any overlays to `render_pass`.
@@ -701,6 +705,85 @@ impl SsbhRenderer {
             &self.swing_camera_bind_group,
             hidden_collisions,
         );
+    }
+
+    /// Re-render visible mesh geometry into the internal 1× resolved depth target.
+    ///
+    /// Called at the end of [`Self::begin_render_models`]. [`Self::copy_mesh_depth_resolved`]
+    /// copies this buffer for editor particle depth tests.
+    pub fn refresh_mesh_depth_resolved(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        render_models: &[RenderModel],
+    ) {
+        self.render_scene_depth(
+            encoder,
+            &self.pass_info.mesh_depth_resolved.view,
+            render_models,
+        );
+    }
+
+    /// Copy the 1× mesh depth populated by [`Self::refresh_mesh_depth_resolved`].
+    pub fn copy_mesh_depth_resolved(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pass_info.mesh_depth_resolved.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: dst,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Render visible mesh geometry into a 1× [`DEPTH_FORMAT`] attachment for editor particle depth tests.
+    ///
+    /// Matches the shaded pass order (`opaque` → `far` → `sort` → `near`) so near materials occlude
+    /// particles the same way as in [`Self::begin_render_models`]. wgpu has no MSAA depth resolve, so
+    /// this re-renders at 1× instead of copying [`PassInfo::depth`] (4× MSAA).
+    pub fn render_scene_depth<'a>(
+        &'a self,
+        encoder: &mut wgpu::CommandEncoder,
+        depth_view: &'a wgpu::TextureView,
+        render_models: &'a [RenderModel],
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Editor Scene Depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shadow_pipeline);
+        for layer in ["opaque", "far", "sort", "near"] {
+            for model in render_models.iter().filter(|m| m.is_visible) {
+                model.draw_meshes_depth_pass(&mut pass, &self.per_frame_bind_group, layer);
+            }
+        }
     }
 
     fn draw_material_mask<'a>(
@@ -1367,11 +1450,18 @@ fn create_color_pass<'a>(
 }
 
 // TODO: Move this to it's own module?
+struct ResolvedDepthTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 struct PassInfo {
     // TODO: most of these just need a view?
     color: TextureSamplerView,
     color_msaa: TextureSamplerView,
     depth: TextureSamplerView,
+    /// 1× resolved mesh depth for editor particle occlusion (see [`SsbhRenderer::refresh_mesh_depth_resolved`]).
+    mesh_depth_resolved: ResolvedDepthTarget,
 
     // TODO: Most of these textures can just be cleared and reused.
     skel_depth_stencil: TextureSamplerView,
@@ -1416,6 +1506,7 @@ impl PassInfo {
         surface_format: wgpu::TextureFormat,
     ) -> Self {
         let depth = create_depth(device, width, height, MSAA_SAMPLE_COUNT);
+        let mesh_depth_resolved = create_resolved_depth(device, width, height);
 
         // TODO: Reuse textures for outlines?
         let skel_depth_stencil = create_depth_stencil(device, width, height);
@@ -1483,6 +1574,7 @@ impl PassInfo {
 
         Self {
             depth,
+            mesh_depth_resolved,
             skel_depth_stencil,
             skel_mask,
             skel_outlines,
@@ -1505,6 +1597,32 @@ impl PassInfo {
             skel_outline_bind_group,
         }
     }
+}
+
+fn create_resolved_depth(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ResolvedDepthTarget {
+    let size = wgpu::Extent3d {
+        width: width.max(1),
+        height: height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh depth resolved"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    ResolvedDepthTarget { texture, view }
 }
 
 fn create_depth(

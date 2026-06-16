@@ -648,17 +648,29 @@ impl RenderModel {
         render_pass: &mut wgpu::RenderPass<'a>,
         per_frame_bind_group: &'a crate::shader::model::bind_groups::BindGroup0,
     ) {
-        // Assume only shared bind groups for all meshes.
         per_frame_bind_group.set(render_pass);
         self.per_model_bind_group.set(render_pass);
+        for mesh in self.meshes.iter().filter(|m| m.is_visible) {
+            if mesh.vertex_index_count > 0 {
+                if self.set_mesh_buffers(render_pass, mesh).is_some() {
+                    render_pass.draw_indexed(0..mesh.vertex_index_count as u32, 0, 0..1);
+                }
+            }
+        }
+    }
 
-        // The numshexb can disable shadows for transparent models or special effects.
-        for mesh in self
-            .meshes
-            .iter()
-            .filter(|m| m.is_visible && m.meshex_flags.cast_shadow)
-        {
-            // Prevent potential validation error from empty meshes.
+    /// Depth-only draw for meshes in a render pass layer (`opaque`, `far`, `sort`, `near`).
+    pub(crate) fn draw_meshes_depth_pass<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        per_frame_bind_group: &'a crate::shader::model::bind_groups::BindGroup0,
+        pass: &str,
+    ) {
+        per_frame_bind_group.set(render_pass);
+        self.per_model_bind_group.set(render_pass);
+        for mesh in self.meshes.iter().filter(|m| {
+            m.is_visible && m.shader_label.ends_with(pass) && m.meshex_flags.draw_model
+        }) {
             if mesh.vertex_index_count > 0 {
                 if self.set_mesh_buffers(render_pass, mesh).is_some() {
                     render_pass.draw_indexed(0..mesh.vertex_index_count as u32, 0, 0..1);
