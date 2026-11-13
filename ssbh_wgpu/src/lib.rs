@@ -42,7 +42,7 @@ pub use render_settings::{
     DebugMode, MaterialType, ModelRenderOptions, RenderSettings, SkinningSettings,
     TransitionMaterial,
 };
-pub use renderer::SsbhRenderer;
+pub use renderer::{SceneTarget, SsbhRenderer, DEPTH_FORMAT, MSAA_SAMPLE_COUNT, RGBA_COLOR_FORMAT};
 pub use shader::model::CameraTransforms;
 pub use texture::{create_default_textures, load_default_spec_cube};
 

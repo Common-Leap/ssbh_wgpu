@@ -98,6 +98,9 @@ pub struct SsbhRenderer {
 
     clear_color: [f64; 4],
 
+    /// What the model pass clears its color to, before bloom and post processing.
+    scene_clear_color: wgpu::Color,
+
     render_settings: RenderSettings,
     render_settings_buffer: wgpu::Buffer,
 
@@ -110,6 +113,17 @@ pub struct SsbhRenderer {
 
     per_frame_buffer: wgpu::Buffer,
     per_view_buffer: wgpu::Buffer,
+}
+
+/// The scene's color and depth as the models left them, before bloom and post processing.
+/// Draw with `color` as the attachment and `resolve` as its resolve target, so the resolved
+/// image bloom reads includes what was drawn.
+pub struct SceneTarget<'a> {
+    pub color: &'a wgpu::TextureView,
+    pub resolve: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+    pub sample_count: u32,
+    pub format: wgpu::TextureFormat,
 }
 
 impl SsbhRenderer {
@@ -354,6 +368,7 @@ impl SsbhRenderer {
             skeleton_camera_bind_group,
             pass_info,
             color_lut,
+            scene_clear_color: wgpu::Color::TRANSPARENT,
             shadow_depth,
             variance_shadow_pipeline,
             variance_shadow,
@@ -529,6 +544,61 @@ impl SsbhRenderer {
         );
     }
 
+    /// Sets the color grading LUT from raw RGBA8 texels, 16x16x16 with red varying fastest.
+    /// Unlike [Self::update_color_lut], the LUT survives a resize.
+    pub fn update_color_lut_rgba(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, rgba: &[u8]) {
+        if rgba.len() != 16 * 16 * 16 * 4 {
+            return;
+        }
+        use wgpu::util::DeviceExt;
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Color Grading Lut"),
+                size: wgpu::Extent3d {
+                    width: 16,
+                    height: 16,
+                    depth_or_array_layers: 16,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba,
+        );
+        self.color_lut = TextureSamplerView {
+            view: texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D3),
+                ..Default::default()
+            }),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                min_filter: wgpu::FilterMode::Linear,
+                mag_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+        };
+        self.pass_info.post_process_bind_group = create_post_process_bind_group(
+            device,
+            &self.pass_info.color,
+            &self.pass_info.bloom_upscaled,
+            &self.color_lut,
+        );
+    }
+
+    /// What the model pass clears to. The default is transparent, which keeps the background
+    /// out of bloom and color grading; an opaque color makes the background part of the scene,
+    /// as a stage is in game.
+    pub fn set_scene_clear_color(&mut self, color: wgpu::Color) {
+        self.scene_clear_color = color;
+    }
+
     /// Sets the viewport background color.
     pub fn set_clear_color(&mut self, color: [f64; 4]) {
         self.clear_color = color;
@@ -569,6 +639,26 @@ impl SsbhRenderer {
         shader_database: &ShaderDatabase,
         options: &ModelRenderOptions,
     ) {
+        self.begin_render_models_with_scene(
+            encoder,
+            render_models,
+            shader_database,
+            options,
+            &mut |_, _| {},
+        );
+    }
+
+    /// [Self::begin_render_models], calling `scene` right after the models are drawn and
+    /// before bloom and post processing, so other geometry (effects) can draw into the scene
+    /// and get the same bloom and color grading. Only called in shaded mode.
+    pub fn begin_render_models_with_scene<'a>(
+        &'a self,
+        encoder: &'a mut wgpu::CommandEncoder,
+        render_models: &'a [RenderModel],
+        shader_database: &ShaderDatabase,
+        options: &ModelRenderOptions,
+        scene: &mut dyn FnMut(&mut wgpu::CommandEncoder, SceneTarget<'_>),
+    ) {
         // TODO: How to have RenderModel own all resources but still sort RenderMesh?
 
         // Transform the vertex positions and normals.
@@ -594,6 +684,17 @@ impl SsbhRenderer {
 
             // Draw the models to the initial color texture.
             self.model_pass(encoder, render_models, shader_database);
+
+            scene(
+                encoder,
+                SceneTarget {
+                    color: &self.pass_info.color_msaa.view,
+                    resolve: &self.pass_info.color.view,
+                    depth: &self.pass_info.depth.view,
+                    sample_count: MSAA_SAMPLE_COUNT,
+                    format: RGBA_COLOR_FORMAT,
+                },
+            );
 
             // TODO: Will these be faster as compute passes?
             // Extract the portions of the image that contribute to bloom.
@@ -841,7 +942,7 @@ impl SsbhRenderer {
                 view: &self.pass_info.color_msaa.view,
                 resolve_target: Some(&self.pass_info.color.view),
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(self.scene_clear_color),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
