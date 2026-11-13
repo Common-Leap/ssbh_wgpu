@@ -672,6 +672,17 @@ impl SsbhRenderer {
 
     /// Completes rendering by drawing the models and any overlays to `render_pass`.
     /// The `render_pass` should use the color format used for creation with no depth attachment.
+    /// The depth the models were drawn with (multisampled, [DEPTH_FORMAT]), for drawing other
+    /// geometry so the models hide it.
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.pass_info.depth.view
+    }
+
+    /// The sample count of [Self::depth_view].
+    pub fn depth_sample_count(&self) -> u32 {
+        MSAA_SAMPLE_COUNT
+    }
+
     pub fn end_render_models(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         // TODO: This can be combined with post processing?
         // Composite the outlines onto the result of the debug or shaded passes.
