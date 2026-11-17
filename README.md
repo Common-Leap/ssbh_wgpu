@@ -1,6 +1,17 @@
 # ssbh_wgpu
 ssbh_wgpu is a lightweight and portable Smash Ultimate model and texture renderer built using [WGPU](https://github.com/gfx-rs/wgpu). 
 
+> **This fork** is upstream `main` plus two additions [Visionary](https://github.com/Common-Leap/Visionary) needs to draw its effects into the model scene:
+>
+> - `SsbhRenderer::depth_view` gives the depth the models were drawn with, so other geometry can be hidden behind them.
+> - `SsbhRenderer::begin_render_models_with_scene` calls back after the models are drawn and before bloom and color grading, so other geometry (effects) gets the same post processing.
+>
+> Use it like upstream, from the `visionary` branch:
+>
+> ```
+> ssbh_wgpu = { git = "https://github.com/Common-Leap/ssbh_wgpu", branch = "visionary" }
+> ```
+
 ## Usage
 Add the following lines to the `Cargo.toml`. This library is still highly experimental. Specify the commit tag or commit the `Cargo.lock` file to version control to avoid any versioning issues. For an example of an application using this renderer, see [ssbh_editor](https://github.com/ScanMountGoat/ssbh_editor).
 
