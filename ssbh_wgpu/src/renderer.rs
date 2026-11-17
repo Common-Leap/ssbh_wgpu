@@ -690,7 +690,7 @@ impl SsbhRenderer {
                 SceneTarget {
                     color: &self.pass_info.color_msaa.view,
                     resolve: &self.pass_info.color.view,
-                    depth: &self.pass_info.depth.view,
+                    depth: &self.pass_info.depth_msaa.view,
                     sample_count: MSAA_SAMPLE_COUNT,
                     format: RGBA_COLOR_FORMAT,
                 },
@@ -776,7 +776,7 @@ impl SsbhRenderer {
     /// The depth the models were drawn with (multisampled, [DEPTH_FORMAT]), for drawing other
     /// geometry so the models hide it.
     pub fn depth_view(&self) -> &wgpu::TextureView {
-        &self.pass_info.depth.view
+        &self.pass_info.depth_msaa.view
     }
 
     /// The sample count of [Self::depth_view].
